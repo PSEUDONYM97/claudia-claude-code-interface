@@ -37,3 +37,25 @@ CLAUDE.md
 .claude/
 
 .env
+
+# Personal and debug files - SHOULD NOT BE PUBLIC
+*.png
+*.jpg
+*.jpeg
+!src/assets/**/*.png
+!src/assets/**/*.jpg  
+!src-tauri/icons/*.png
+!src-tauri/icons/*.ico
+CLAUDE_HANDOFF_NOTES.md
+analysis/
+docs/project_states/
+debug_*.js
+test_*.js
+rust_path_test.*
+*.pdb
+*.exe
+nul
+
+# Build outputs
+/src-tauri/target/
+/build/
