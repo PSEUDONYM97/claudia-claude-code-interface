@@ -144,22 +144,40 @@ fn source_preference(installation: &ClaudeInstallation) -> u8 {
 
 /// Discovers all Claude installations on the system
 fn discover_system_installations() -> Vec<ClaudeInstallation> {
+    info!("Starting discovery of Claude installations...");
     let mut installations = Vec::new();
 
     // 1. Try 'which' command first (now works in production)
+    info!("Checking with 'which' command...");
     if let Some(installation) = try_which_command() {
         installations.push(installation);
     }
 
     // 2. Check NVM paths
+    info!("Checking NVM paths...");
     installations.extend(find_nvm_installations());
 
     // 3. Check standard paths
+    info!("Checking standard paths...");
     installations.extend(find_standard_installations());
+    
+    // 4. Check WSL on Windows
+    #[cfg(target_os = "windows")]
+    {
+        info!("Checking WSL installations...");
+        installations.extend(find_wsl_installations());
+    }
+
+    info!("Found {} total installations before deduplication", installations.len());
 
     // Remove duplicates by path
     let mut unique_paths = std::collections::HashSet::new();
     installations.retain(|install| unique_paths.insert(install.path.clone()));
+
+    info!("Final count: {} installations", installations.len());
+    for inst in &installations {
+        info!("Found: {} at {} (version: {:?})", inst.source, inst.path, inst.version);
+    }
 
     installations
 }
@@ -167,6 +185,54 @@ fn discover_system_installations() -> Vec<ClaudeInstallation> {
 /// Try using the 'which' command to find Claude
 fn try_which_command() -> Option<ClaudeInstallation> {
     debug!("Trying 'which claude' to find binary...");
+
+    // On Windows, try both 'where' and 'which' commands to find the best option
+    #[cfg(target_os = "windows")]
+    {
+        // First try 'where' command which is native to Windows and shows all matches
+        if let Ok(output) = Command::new("where").arg("claude").output() {
+            if output.status.success() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                let lines: Vec<&str> = output_str.lines().collect();
+                
+                info!("'where' found {} claude executables", lines.len());
+                for line in &lines {
+                    info!("  {}", line.trim());
+                }
+                
+                // Prefer .cmd files over shell scripts
+                let cmd_file = lines.iter().find(|line| line.trim().ends_with(".cmd"));
+                if let Some(cmd_path) = cmd_file {
+                    let path = cmd_path.trim().to_string();
+                    if PathBuf::from(&path).exists() {
+                        info!("Selected Windows batch file: {}", path);
+                        let version = get_claude_version(&path).ok().flatten();
+                        return Some(ClaudeInstallation {
+                            path,
+                            version,
+                            source: "where".to_string(),
+                            installation_type: InstallationType::System,
+                        });
+                    }
+                }
+                
+                // Fallback to first available path if no .cmd found
+                if let Some(first_path) = lines.first() {
+                    let path = first_path.trim().to_string();
+                    if PathBuf::from(&path).exists() {
+                        info!("Using first available path from 'where': {}", path);
+                        let version = get_claude_version(&path).ok().flatten();
+                        return Some(ClaudeInstallation {
+                            path,
+                            version,
+                            source: "where".to_string(),
+                            installation_type: InstallationType::System,
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     match Command::new("which").arg("claude").output() {
         Ok(output) if output.status.success() => {
@@ -177,7 +243,7 @@ fn try_which_command() -> Option<ClaudeInstallation> {
             }
 
             // Parse aliased output: "claude: aliased to /path/to/claude"
-            let path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
+            let mut path = if output_str.starts_with("claude:") && output_str.contains("aliased to") {
                 output_str
                     .split("aliased to")
                     .nth(1)
@@ -186,7 +252,53 @@ fn try_which_command() -> Option<ClaudeInstallation> {
                 Some(output_str)
             }?;
 
-            debug!("'which' found claude at: {}", path);
+            info!("'which' found claude at: {}", path);
+
+            // On Windows, prefer .cmd file over shell script and fix path format
+            #[cfg(target_os = "windows")]
+            {
+                info!("Windows-specific path processing starting for: {}", path);
+                
+                // First, try to find the .cmd variant before path conversion
+                if !path.ends_with(".cmd") && !path.ends_with(".bat") {
+                    let cmd_path = format!("{}.cmd", path);
+                    info!("Checking for Windows batch file variant: {}", cmd_path);
+                    
+                    // Try Windows converted path with proper case
+                    let windows_cmd_path = if cmd_path.starts_with("/c/") {
+                        let mut path = cmd_path.replace("/c/", "C:\\").replace("/", "\\");
+                        path = path.replace("C:\\users", "C:\\Users");
+                        path = path.replace("\\appdata\\", "\\AppData\\");
+                        path = path.replace("\\roaming\\", "\\Roaming\\");
+                        path
+                    } else {
+                        cmd_path.clone()
+                    };
+                    
+                    let windows_path_buf = PathBuf::from(&windows_cmd_path);
+                    
+                    if windows_path_buf.exists() {
+                        info!("✓ Found Windows batch file variant: {}", windows_cmd_path);
+                        // Use the Windows path instead
+                        path = windows_cmd_path;
+                    } else {
+                        info!("✗ Windows batch file variant not found at: {}", windows_cmd_path);
+                        // Convert the original path anyway
+                        if path.starts_with("/c/") {
+                            let old_path = path.clone();
+                            path = path.replace("/c/", "C:\\").replace("/", "\\");
+                            path = path.replace("C:\\users", "C:\\Users");
+                            path = path.replace("\\appdata\\", "\\AppData\\");
+                            path = path.replace("\\roaming\\", "\\Roaming\\");
+                            info!("Converted Unix path '{}' to Windows path '{}'", old_path, path);
+                        }
+                    }
+                } else {
+                    info!("Path already ends with .cmd or .bat: {}", path);
+                }
+                
+                info!("Final Windows-processed path: {}", path);
+            }
 
             // Verify the path exists
             if !PathBuf::from(&path).exists() {
@@ -294,6 +406,25 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
         ]);
     }
 
+    // Windows-specific paths (prefer .cmd files over shell scripts)
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            paths_to_check.extend(vec![
+                // Check .cmd first (higher priority by being first in the list)
+                (
+                    format!("{}\\AppData\\Roaming\\npm\\claude.cmd", userprofile),
+                    "npm-global".to_string(),
+                ),
+                // Check shell script as fallback
+                (
+                    format!("{}\\AppData\\Roaming\\npm\\claude", userprofile),
+                    "npm-global-shell".to_string(),
+                ),
+            ]);
+        }
+    }
+
     // Check each path
     for (path, source) in paths_to_check {
         let path_buf = PathBuf::from(&path);
@@ -332,7 +463,35 @@ fn find_standard_installations() -> Vec<ClaudeInstallation> {
 
 /// Get Claude version by running --version command
 fn get_claude_version(path: &str) -> Result<Option<String>, String> {
-    match Command::new(path).arg("--version").output() {
+    let mut cmd;
+    
+    // Special handling for Windows batch files
+    #[cfg(target_os = "windows")]
+    {
+        if path.ends_with(".cmd") || path.ends_with(".bat") {
+            // Try to resolve to the underlying Node.js script
+            if let Some(cli_js_path) = resolve_npm_cli_script(path) {
+                debug!("Using direct Node.js execution for version check: node {}", cli_js_path);
+                cmd = Command::new("node");
+                cmd.arg(cli_js_path);
+            } else {
+                debug!("Using cmd.exe for batch file version check: {}", path);
+                cmd = Command::new("cmd");
+                cmd.arg("/C");
+                cmd.arg(path);
+            }
+        } else {
+            cmd = Command::new(path);
+        }
+    }
+    
+    // Non-Windows platforms use the original approach
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd = Command::new(path);
+    }
+    
+    match cmd.arg("--version").output() {
         Ok(output) => {
             if output.status.success() {
                 Ok(extract_version_from_output(&output.stdout))
@@ -447,6 +606,38 @@ fn compare_versions(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
+/// Helper function to resolve Windows npm batch file to its underlying Node.js script
+/// Returns the path to the CLI script if it exists, otherwise returns None
+#[cfg(target_os = "windows")]
+pub fn resolve_npm_cli_script(batch_path: &str) -> Option<String> {
+    info!("🔍 Resolving npm CLI script for batch path: {}", batch_path);
+    
+    if batch_path.contains("AppData\\Roaming\\npm") && batch_path.ends_with("claude.cmd") {
+        // The CLI script is in the npm directory, not the claude directory
+        // Replace "claude.cmd" with "node_modules\@anthropic-ai\claude-code\cli.js"
+        let cli_js_path = batch_path.replace("\\claude.cmd", "\\node_modules\\@anthropic-ai\\claude-code\\cli.js");
+        let cli_js_path = std::path::Path::new(&cli_js_path);
+        
+        info!("Checking for CLI script at: {}", cli_js_path.display());
+        
+        if cli_js_path.exists() {
+            info!("✓ Resolved npm CLI script: {}", cli_js_path.display());
+            Some(cli_js_path.to_string_lossy().to_string())
+        } else {
+            warn!("✗ CLI script not found at: {}", cli_js_path.display());
+            None
+        }
+    } else {
+        info!("Batch path does not match npm pattern: {}", batch_path);
+        None
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn resolve_npm_cli_script(_batch_path: &str) -> Option<String> {
+    None
+}
+
 /// Helper function to create a Command with proper environment variables
 /// This ensures commands like Claude can find Node.js and other dependencies
 pub fn create_command_with_env(program: &str) -> Command {
@@ -504,4 +695,78 @@ pub fn create_command_with_env(program: &str) -> Command {
     }
 
     cmd
+}
+
+/// Check if Claude is available in WSL (Windows only)
+#[cfg(target_os = "windows")]
+fn find_wsl_installations() -> Vec<ClaudeInstallation> {
+    let mut installations = Vec::new();
+    
+    debug!("Checking for Claude in WSL...");
+    
+    // Check if WSL is available
+    match std::process::Command::new("wsl").arg("--list").output() {
+        Ok(output) if output.status.success() => {
+            debug!("WSL is available, checking for claude variants...");
+            
+            // Try different claude command names
+            let claude_variants = vec!["claude-code", "claude", "claude-cli"];
+            
+            for variant in claude_variants {
+                debug!("Checking for {} in WSL...", variant);
+                
+                match std::process::Command::new("wsl")
+                    .args(&["which", variant])
+                    .output() 
+                {
+                    Ok(output) if output.status.success() => {
+                        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !path.is_empty() {
+                            info!("Found {} in WSL at: {}", variant, path);
+                            
+                            // Get version through WSL
+                            let version = match std::process::Command::new("wsl")
+                                .args(&[variant, "--version"])
+                                .output()
+                            {
+                                Ok(v_output) if v_output.status.success() => {
+                                    extract_version_from_output(&v_output.stdout)
+                                }
+                                _ => None,
+                            };
+                            
+                            installations.push(ClaudeInstallation {
+                                path: format!("wsl:{}", variant), // Special prefix for WSL
+                                version,
+                                source: "wsl".to_string(),
+                                installation_type: InstallationType::System,
+                            });
+                            
+                            // Found one, no need to check other variants
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to check {} in WSL: {}", variant, e);
+                    }
+                    _ => {
+                        debug!("{} not found in WSL", variant);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            debug!("WSL not available: {}", e);
+        }
+        _ => {
+            debug!("WSL check failed");
+        }
+    }
+    
+    installations
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_wsl_installations() -> Vec<ClaudeInstallation> {
+    Vec::new()
 }

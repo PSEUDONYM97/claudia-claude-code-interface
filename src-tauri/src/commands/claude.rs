@@ -270,11 +270,59 @@ fn create_system_command(
     args: Vec<String>,
     project_path: &str,
 ) -> Command {
-    let mut cmd = create_command_with_env(claude_path);
+    let mut cmd;
     
-    // Add all arguments
-    for arg in args {
-        cmd.arg(arg);
+    // Special handling for Windows batch files
+    #[cfg(target_os = "windows")]
+    {
+        log::info!("🔍 Windows command creation for path: {}", claude_path);
+        
+        if claude_path.ends_with(".cmd") || claude_path.ends_with(".bat") {
+            // For Windows batch files, try to execute the underlying Node.js script directly
+            // This is more reliable than using cmd.exe with batch files
+            log::info!("✓ Detected Windows batch file: {}", claude_path);
+            
+            // Try to resolve to the underlying Node.js script
+            if let Some(cli_js_path) = crate::claude_binary::resolve_npm_cli_script(claude_path) {
+                log::info!("✓ Using direct Node.js execution: node {}", cli_js_path);
+                log::info!("Arguments to be passed: {:?}", args);
+                cmd = Command::new("node");
+                cmd.arg(cli_js_path);
+                
+                // Add all other arguments directly
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            } else {
+                log::warn!("⚠️ Could not resolve CLI script, using cmd.exe for batch file: {}", claude_path);
+                cmd = Command::new("cmd");
+                cmd.arg("/C");
+                cmd.arg(claude_path);
+                
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            }
+            
+            log::info!("✓ Windows command constructed successfully");
+        } else {
+            log::info!("Using standard command creation for: {}", claude_path);
+            cmd = create_command_with_env(claude_path);
+            // Add all arguments normally for non-batch files
+            for arg in args {
+                cmd.arg(arg);
+            }
+        }
+    }
+    
+    // Non-Windows platforms use the original approach
+    #[cfg(not(target_os = "windows"))]
+    {
+        cmd = create_command_with_env(claude_path);
+        // Add all arguments
+        for arg in args {
+            cmd.arg(arg);
+        }
     }
     
     cmd.current_dir(project_path)

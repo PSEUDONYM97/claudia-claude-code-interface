@@ -37,7 +37,7 @@ export const TokenCounter: React.FC<TokenCounterProps> = ({
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.8 }}
       className={cn(
-        "fixed bottom-20 right-4 z-30",
+        "fixed bottom-4 right-4 z-30",
         "bg-background/90 backdrop-blur-sm",
         "border border-border rounded-full",
         "px-3 py-1.5 shadow-lg",

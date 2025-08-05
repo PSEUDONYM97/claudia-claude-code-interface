@@ -197,7 +197,7 @@ const FloatingPromptInputInner = (
     () => ({
       addImage: (imagePath: string) => {
         setPrompt(currentPrompt => {
-          const existingPaths = extractImagePaths(currentPrompt);
+          const existingPaths = extractFilePaths(currentPrompt);
           if (existingPaths.includes(imagePath)) {
             return currentPrompt; // Image already added
           }
@@ -231,9 +231,9 @@ const FloatingPromptInputInner = (
     return ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'ico', 'bmp'].includes(ext || '');
   };
 
-  // Extract image paths from prompt text
-  const extractImagePaths = (text: string): string[] => {
-    console.log('[extractImagePaths] Input text length:', text.length);
+  // Extract file paths from prompt text (both images and regular files)
+  const extractFilePaths = (text: string): string[] => {
+    console.log('[extractFilePaths] Input text length:', text.length);
     
     // Updated regex to handle both quoted and unquoted paths
     // Pattern 1: @"path with spaces or data URLs" - quoted paths
@@ -245,20 +245,18 @@ const FloatingPromptInputInner = (
     
     // First, extract quoted paths (including data URLs)
     let matches = Array.from(text.matchAll(quotedRegex));
-    console.log('[extractImagePaths] Quoted matches:', matches.length);
+    console.log('[extractFilePaths] Quoted matches:', matches.length);
     
     for (const match of matches) {
       const path = match[1]; // No need to trim, quotes preserve exact path
-      console.log('[extractImagePaths] Processing quoted path:', path.startsWith('data:') ? 'data URL' : path);
+      console.log('[extractFilePaths] Processing quoted path:', path.startsWith('data:') ? 'data URL' : path);
       
       // For data URLs, use as-is; for file paths, convert to absolute
       const fullPath = path.startsWith('data:') 
         ? path 
         : (path.startsWith('/') ? path : (projectPath ? `${projectPath}/${path}` : path));
       
-      if (isImageFile(fullPath)) {
-        pathsSet.add(fullPath);
-      }
+      pathsSet.add(fullPath); // Add ALL files, not just images
     }
     
     // Remove quoted mentions from text to avoid double-matching
@@ -266,32 +264,31 @@ const FloatingPromptInputInner = (
     
     // Then extract unquoted paths (typically file paths)
     matches = Array.from(textWithoutQuoted.matchAll(unquotedRegex));
-    console.log('[extractImagePaths] Unquoted matches:', matches.length);
+    console.log('[extractFilePaths] Unquoted matches:', matches.length);
     
     for (const match of matches) {
       const path = match[1].trim();
       // Skip if it looks like a data URL fragment (shouldn't happen with proper quoting)
       if (path.includes('data:')) continue;
       
-      console.log('[extractImagePaths] Processing unquoted path:', path);
+      console.log('[extractFilePaths] Processing unquoted path:', path);
       
       // Convert relative path to absolute if needed
       const fullPath = path.startsWith('/') ? path : (projectPath ? `${projectPath}/${path}` : path);
       
-      if (isImageFile(fullPath)) {
-        pathsSet.add(fullPath);
-      }
+      pathsSet.add(fullPath); // Add ALL files, not just images
     }
 
     const uniquePaths = Array.from(pathsSet);
-    console.log('[extractImagePaths] Final extracted paths (unique):', uniquePaths.length);
+    console.log('[extractFilePaths] Final extracted paths (unique):', uniquePaths.length);
     return uniquePaths;
   };
 
   // Update embedded images when prompt changes
   useEffect(() => {
     console.log('[useEffect] Prompt changed:', prompt);
-    const imagePaths = extractImagePaths(prompt);
+    const filePaths = extractFilePaths(prompt);
+    const imagePaths = filePaths.filter(isImageFile); // Only show images in preview
     console.log('[useEffect] Setting embeddedImages to:', imagePaths);
     setEmbeddedImages(imagePaths);
   }, [prompt, projectPath]);
@@ -326,15 +323,15 @@ const FloatingPromptInputInner = (
             lastDropTime = currentTime;
 
             const droppedPaths = event.payload.paths as string[];
-            const imagePaths = droppedPaths.filter(isImageFile);
+            const allFilePaths = droppedPaths; // Include ALL files, not just images
 
-            if (imagePaths.length > 0) {
+            if (allFilePaths.length > 0) {
               setPrompt(currentPrompt => {
-                const existingPaths = extractImagePaths(currentPrompt);
-                const newPaths = imagePaths.filter(p => !existingPaths.includes(p));
+                const existingPaths = extractFilePaths(currentPrompt);
+                const newPaths = allFilePaths.filter(p => !existingPaths.includes(p));
 
                 if (newPaths.length === 0) {
-                  return currentPrompt; // All dropped images are already in the prompt
+                  return currentPrompt; // All dropped files are already in the prompt
                 }
 
                 // Wrap paths with spaces in quotes for clarity
@@ -863,10 +860,10 @@ const FloatingPromptInputInner = (
         )}
       </AnimatePresence>
 
-      {/* Fixed Position Input Bar */}
+      {/* Bottom Input Bar */}
       <div
         className={cn(
-          "fixed bottom-0 left-0 right-0 z-40 bg-background border-t border-border",
+          "w-full z-40 bg-background border-t border-border",
           dragActive && "ring-2 ring-primary ring-offset-2",
           className
         )}
